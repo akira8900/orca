@@ -297,6 +297,72 @@ describe('ssh status timeline', () => {
     expect(timeline.snapshotSshStatusTimeline('target-1', 'env::a')).toHaveLength(1)
   })
 
+  // `scopeOf` is the only thing keeping one host's ring out of another's, so the
+  // two inputs it could once map onto the same key are pinned here.
+  it('keeps an environment named like the local scope out of the local ring', () => {
+    timeline.recordSshStateArrival('target-1', sshState({ status: 'connected' }), 'push')
+    vi.advanceTimersByTime(1_000)
+    timeline.recordSshStateArrival(
+      'target-1',
+      sshState({ status: 'error', error: 'remote host refused' }),
+      'runtime-push',
+      'local'
+    )
+
+    expect(timeline.snapshotSshStatusTimeline('target-1').map((entry) => entry.status)).toEqual([
+      'connected'
+    ])
+    expect(
+      timeline.snapshotSshStatusTimeline('target-1', 'local').map((entry) => entry.status)
+    ).toEqual(['error'])
+  })
+
+  it('does not merge an environment id with the escaped form of another', () => {
+    timeline.recordSshStateArrival(
+      'target-1',
+      sshState({ status: 'connected' }),
+      'runtime-push',
+      'a:b'
+    )
+    vi.advanceTimersByTime(1_000)
+    timeline.recordSshStateArrival(
+      'target-1',
+      sshState({ status: 'error', error: 'remote host refused' }),
+      'runtime-push',
+      'a%3Ab'
+    )
+
+    expect(
+      timeline.snapshotSshStatusTimeline('target-1', 'a:b').map((entry) => entry.status)
+    ).toEqual(['connected'])
+    expect(
+      timeline.snapshotSshStatusTimeline('target-1', 'a%3Ab').map((entry) => entry.status)
+    ).toEqual(['error'])
+  })
+
+  // A rehydration sweep re-reads states that never re-arrived; counting those
+  // would inflate the repeats/runMs the report is read for.
+  it('does not fold a hydration re-read into the arrival it re-reads', () => {
+    const arrival = sshState({ status: 'reconnecting', reconnectAttempt: 2 })
+    timeline.recordSshStateArrival('target-1', arrival, 'runtime-push', 'env-1')
+    vi.advanceTimersByTime(1_000)
+    timeline.recordSshStateArrival('target-1', arrival, 'runtime-hydration', 'env-1')
+
+    expect(timeline.snapshotSshStatusTimeline('target-1', 'env-1')).toEqual([
+      expect.objectContaining({ status: 'reconnecting', repeats: 1, runMs: null })
+    ])
+  })
+
+  // A backwards system clock is the only way `now` precedes the run start.
+  it('never reports a negative run duration', () => {
+    const arrival = sshState({ status: 'reconnecting', reconnectAttempt: 1 })
+    timeline.recordSshStateArrival('target-1', arrival, 'push')
+    vi.setSystemTime(Date.now() - 30_000)
+    timeline.recordSshStateArrival('target-1', arrival, 'push')
+
+    expect(timeline.snapshotSshStatusTimeline('target-1')[0].runMs).toBe(0)
+  })
+
   it('decodes status and attempt back out of the encoded kind', () => {
     timeline.recordSshStateArrival(
       'target-1',

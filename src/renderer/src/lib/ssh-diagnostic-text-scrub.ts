@@ -21,6 +21,10 @@ import { redactString } from '../../../shared/observability-redactor'
 
 /** Free text is redacted first, then cut — see `scrubDiagnosticText`. */
 export const MAX_FREE_TEXT_CHARS = 512
+// Same bound as the timeline's record-time cap: large enough that a typical PEM
+// still carries its `-----END` for the secrets scrubber, small enough that a
+// pathological system-SSH stderr cannot make the copy click O(stderr length).
+export const MAX_SCRUB_INPUT_CHARS = 4096
 
 const PATH_PLACEHOLDER = '<path>'
 const HOST_PLACEHOLDER = '<host>'
@@ -34,9 +38,13 @@ const NO_SPACE = String.raw`[^\s'"\`<>|]`
 // A segment of a spaced path. Excludes `:` so OpenSSH's own verdict survives:
 // `…\id_rsa: bad permissions` keeps the ": bad permissions".
 const SEGMENT = String.raw`[^\s'"\`<>|\\/:]`
-// Any segment may carry spaces, *including the last* — a space-free terminal is
-// what republished `/Users/John Smith` as `<path> Smith`.
-const SPACED_BODY = String.raw`(?:${SEGMENT}+${SPACED}[\\/])*(?:${SEGMENT}+${SPACED})?`
+// Interior segments keep free spaced tokens (`Documents and Settings`). The last
+// segment only continues with proper-name / connector tokens so a finished path
+// does not swallow trailing English prose (`…/known_hosts to get rid of…`).
+// A space-free terminal is still what republished `/Users/John Smith` as
+// `<path> Smith`; Title Case covers that without eating `to get rid…`.
+const SPACED_LAST = String.raw`(?: (?:and|of|[A-Z][A-Za-z0-9._$&()+-]*)){0,3}`
+const SPACED_BODY = String.raw`(?:${SEGMENT}+${SPACED}[\\/])*(?:${SEGMENT}+${SPACED_LAST})?`
 
 const PATH_PATTERNS: RegExp[] = [
   // A quoted span opening on a path root is a path in full, spaces included —
@@ -218,28 +226,42 @@ const LABEL_IN_PROSE = /\b(Connection to )(.+?)( is already in progress)/gi
 // `devbox`, `nas`, and every `Permanently added '…'` through. Order matters:
 // the specific carriers must consume their host before the bare `host` rule
 // sees the phrase.
+// Every host/user carrier uses QUOTED_OR_BARE: OpenSSH quotes single-label
+// names as often as it leaves them bare (`hostname 'mybox'`), and a bare-only
+// rule republished the alias inside the quotes.
 const HOST_IN_PROSE: readonly (readonly [RegExp, string])[] = [
-  // `ssh: Could not resolve hostname bastion: Name or service not known`
+  // `ssh: Could not resolve hostname bastion` / `hostname 'mybox'`
   [
-    new RegExp(String.raw`\b(hostname[ \t]+)(?!${NOT_A_HOST})(${HOST_LABEL})`, 'gi'),
+    new RegExp(String.raw`\b(hostname[ \t]+)(?!${NOT_A_HOST})${QUOTED_OR_BARE}`, 'gi'),
     `$1${HOST_PLACEHOLDER}`
   ],
-  // `getaddrinfo ENOTFOUND buildbox`
+  // `getaddrinfo ENOTFOUND buildbox` / `ENOTFOUND 'buildbox'`
   [
-    new RegExp(String.raw`\b((?:ENOTFOUND|EAI_AGAIN|EAI_NONAME)[ \t]+)(${HOST_LABEL})`, 'g'),
+    new RegExp(String.raw`\b((?:ENOTFOUND|EAI_AGAIN|EAI_NONAME)[ \t]+)${QUOTED_OR_BARE}`, 'g'),
     `$1${HOST_PLACEHOLDER}`
   ],
   // `Connection closed by nas port 22`. `remote host` is the anonymous form.
   [
     new RegExp(
-      String.raw`\b(Connection (?:closed|reset|refused) by[ \t]+)(?!${NOT_A_HOST})(${HOST_LABEL})`,
+      String.raw`\b(Connection (?:closed|reset|refused) by[ \t]+)(?!${NOT_A_HOST})${QUOTED_OR_BARE}`,
       'gi'
     ),
     `$1${HOST_PLACEHOLDER}`
   ],
   // `Connection to prod-db closed by remote host.`
   [
-    new RegExp(String.raw`\b(Connection to[ \t]+)(?!${NOT_A_HOST})(${HOST_LABEL})`, 'gi'),
+    new RegExp(String.raw`\b(Connection to[ \t]+)(?!${NOT_A_HOST})${QUOTED_OR_BARE}`, 'gi'),
+    `$1${HOST_PLACEHOLDER}`
+  ],
+  // OpenSSH verbose: `Authenticated to bastion ([10.0.0.1]:22) using "publickey".`
+  // and `Connecting to bastion [10.0.0.1] port 22.` — single-label hosts with no
+  // `host`/`hostname` carrier word.
+  [
+    new RegExp(String.raw`\b(Authenticated to[ \t]+)(?!${NOT_A_HOST})${QUOTED_OR_BARE}`, 'gi'),
+    `$1${HOST_PLACEHOLDER}`
+  ],
+  [
+    new RegExp(String.raw`\b(Connecting to[ \t]+)(?!${NOT_A_HOST})${QUOTED_OR_BARE}`, 'gi'),
     `$1${HOST_PLACEHOLDER}`
   ],
   // `Warning: Permanently added 'prod-db-01' (ED25519) to the list of known hosts.`
@@ -252,16 +274,27 @@ const HOST_IN_PROSE: readonly (readonly [RegExp, string])[] = [
     new RegExp(String.raw`\b(host key for[ \t]+)(?!${NOT_A_HOST})${QUOTED_OR_BARE}`, 'gi'),
     `$1${HOST_PLACEHOLDER}`
   ],
-  // `Connection closed by authenticating user root 10.0.0.5 port 22` — sshd
-  // names the account, and §7 drops usernames as well as hosts.
+  // sshd / OpenSSH account carriers — §7 drops usernames as well as hosts.
+  // `Connection closed by authenticating user root 10.0.0.5 port 22`
+  // `Invalid user alice from 10.0.0.1 port 22`
+  // `Disconnected from user alice 10.0.0.1 port 22`
+  // `Failed password for alice from …` / `Accepted publickey for alice from …`
   [
-    new RegExp(String.raw`\b((?:invalid|authenticating) user[ \t]+)(${HOST_LABEL})`, 'gi'),
+    new RegExp(String.raw`\b((?:invalid|authenticating) user[ \t]+)${QUOTED_OR_BARE}`, 'gi'),
+    '$1<user>'
+  ],
+  [new RegExp(String.raw`\b(Disconnected from user[ \t]+)${QUOTED_OR_BARE}`, 'gi'), '$1<user>'],
+  [
+    new RegExp(
+      String.raw`\b((?:Failed password|Accepted (?:publickey|password|keyboard-interactive)) for[ \t]+)${QUOTED_OR_BARE}`,
+      'gi'
+    ),
     '$1<user>'
   ],
   // `ssh: connect to host devbox port 22: Connection refused`, and whatever
   // other prose puts a name straight after the word.
   [
-    new RegExp(String.raw`\b(host[ \t]+)(?!${NOT_A_HOST})(${HOST_LABEL})`, 'gi'),
+    new RegExp(String.raw`\b(host[ \t]+)(?!${NOT_A_HOST})${QUOTED_OR_BARE}`, 'gi'),
     `$1${HOST_PLACEHOLDER}`
   ]
 ]
@@ -309,25 +342,37 @@ export function redactSshIdentifiers(input: string): string {
 
 // Slicing UTF-16 code units can strand a high surrogate, which `JSON.stringify`
 // then emits as a lone `\ud83d` in the pasted payload.
-function truncateFreeText(text: string): string {
-  if (text.length <= MAX_FREE_TEXT_CHARS) {
+function sliceAvoidingLoneSurrogate(text: string, maxChars: number): string {
+  if (text.length <= maxChars) {
     return text
   }
-  let end = MAX_FREE_TEXT_CHARS - 1
+  let end = maxChars
   const lastCode = text.charCodeAt(end - 1)
   if (lastCode >= 0xd8_00 && lastCode <= 0xdb_ff) {
     end -= 1
   }
-  return `${text.slice(0, end)}…`
+  return text.slice(0, end)
+}
+
+function truncateFreeText(text: string): string {
+  if (text.length <= MAX_FREE_TEXT_CHARS) {
+    return text
+  }
+  // Leave room for the ellipsis so the returned string is always ≤ 512.
+  return `${sliceAvoidingLoneSurrogate(text, MAX_FREE_TEXT_CHARS - 1)}…`
 }
 
 /**
  * The one scrub every free-text field takes. Order is load-bearing: several
  * redactor rules match a whole span and the PEM rule is anchored on its
  * `-----END` terminator, so truncating first would strand the head of a key.
+ * Input is bounded to {@link MAX_SCRUB_INPUT_CHARS} before any regex pass so a
+ * multi-100KB live `state.error` cannot stall the copy click; that bound is
+ * the same one the timeline applies at record time.
  */
 export function scrubDiagnosticText(input: string): string {
-  return truncateFreeText(redactSshIdentifiers(redactString(input)))
+  const bounded = sliceAvoidingLoneSurrogate(input, MAX_SCRUB_INPUT_CHARS)
+  return truncateFreeText(redactSshIdentifiers(redactString(bounded)))
 }
 
 /** First line only — OpenSSH stderr is routinely multi-line, and CRLF-terminated on Windows. */

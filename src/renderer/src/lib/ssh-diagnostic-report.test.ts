@@ -3,6 +3,8 @@ import { useAppStore } from '@/store'
 import type { SshConnectionState, SshProviderEpoch } from '../../../shared/ssh-types'
 import {
   buildSshDiagnosticReport,
+  MAX_FREE_TEXT_CHARS,
+  MAX_SCRUB_INPUT_CHARS,
   redactPaths,
   resetSshDiagnosticAppVersionForTests,
   scrubDiagnosticText
@@ -411,6 +413,33 @@ describe('scrubDiagnosticText', () => {
       'Connection closed by authenticating user root 10.0.0.5 port 22',
       'Connection closed by authenticating user <user> <ip> port 22'
     ],
+    // OpenSSH verbose client lines name the host without the word "host".
+    [
+      'Authenticated to bastion ([10.0.0.1]:22) using "publickey".',
+      'Authenticated to <host> ([<ip>]:22) using "publickey".'
+    ],
+    ['Connecting to bastion [10.0.0.1] port 22.', 'Connecting to <host> [<ip>] port 22.'],
+    // sshd account carriers beyond "authenticating/invalid user".
+    ['Disconnected from user alice 10.0.0.1 port 22', 'Disconnected from user <user> <ip> port 22'],
+    [
+      'Failed password for alice from 10.0.0.1 port 22 ssh2',
+      'Failed password for <user> from <ip> port 22 ssh2'
+    ],
+    [
+      'Accepted publickey for alice from 10.0.0.1 port 22 ssh2',
+      'Accepted publickey for <user> from <ip> port 22 ssh2'
+    ],
+    // Quoted single-label forms — bare HOST_LABEL left these intact.
+    [
+      "ssh: Could not resolve hostname 'mybox': Name or service not known",
+      'ssh: Could not resolve hostname <host>: Name or service not known'
+    ],
+    ['getaddrinfo ENOTFOUND "buildbox"', 'getaddrinfo ENOTFOUND <host>'],
+    [
+      "ssh: connect to host 'devbox' port 22: Connection refused",
+      'ssh: connect to host <host> port 22: Connection refused'
+    ],
+    ["Invalid user 'alice' from 10.0.0.1 port 22", 'Invalid user <user> from <ip> port 22'],
     // A hyphenated host that opens on a stop word is still a host.
     [
       'ssh: connect to host a-host port 22: Connection refused',
@@ -439,7 +468,13 @@ describe('scrubDiagnosticText', () => {
     ['scp: /Volumes/Tim Backup: No such file', 'scp: <path>: No such file'],
     // Not `Users` / `Documents and Settings`: a corporate mapped home drive.
     ['Load key E:\\Home Dirs\\jsmith\\.ssh\\id_rsa: bad perms', 'Load key <path>: bad perms'],
-    ['cannot open .\\keys\\Jane Smith\\id_rsa', 'cannot open <path>']
+    ['cannot open .\\keys\\Jane Smith\\id_rsa', 'cannot open <path>'],
+    // Finished path + English prose must not collapse into one `<path>` span —
+    // the diagnosis after the path is what the user is reporting.
+    [
+      'Add correct host key in /Users/alice/.ssh/known_hosts to get rid of this message.',
+      'Add correct host key in <path> to get rid of this message.'
+    ]
   ])('takes the whole spaced path: %s', (raw, expected) => {
     expect(scrubDiagnosticText(raw)).toBe(expected)
   })
@@ -457,15 +492,34 @@ describe('scrubDiagnosticText', () => {
   })
 
   // The exemptions key on the template, never on the token — a host reads the
-  // same as an RPC method on its own.
+  // same as an RPC method on its own. Quoted FQDNs are eaten whole (quotes
+  // included) by the hostname carrier, same as Permanently added.
   it.each([
-    [`Could not resolve hostname 'db.internal'`, `Could not resolve hostname '<host>'`],
+    [`Could not resolve hostname 'db.internal'`, 'Could not resolve hostname <host>'],
     [
       'connect failed at gitlab.acme.com (retry pending)',
       'connect failed at <host> (retry pending)'
     ]
   ])('still eats a dotted host outside those templates: %s', (raw, expected) => {
     expect(scrubDiagnosticText(raw)).toBe(expected)
+  })
+
+  // Live `state.error` is not record-capped; scrub must bound the regex input
+  // itself so a multi-100KB system-SSH stderr cannot stall the copy click.
+  it('bounds regex work to MAX_SCRUB_INPUT_CHARS before redacting', () => {
+    const secretTail = 'sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    // Secret lives past the input bound — must not appear, and must not force
+    // a full-string scan of the unbounded prefix.
+    const raw = `${'x'.repeat(MAX_SCRUB_INPUT_CHARS + 2_000)}${secretTail}`
+    const start = performance.now()
+    const scrubbed = scrubDiagnosticText(raw)
+    const elapsedMs = performance.now() - start
+
+    expect(scrubbed.length).toBe(MAX_FREE_TEXT_CHARS)
+    expect(scrubbed).not.toContain('sk-ant-')
+    expect(scrubbed).not.toContain(secretTail)
+    // Pathological without the bound was hundreds of ms; keep a soft ceiling.
+    expect(elapsedMs).toBeLessThan(100)
   })
 
   it('is idempotent', () => {
@@ -486,9 +540,13 @@ describe('scrubDiagnosticText', () => {
       'https://gitlab.internal.acme.com/team/repo.git',
       'Connection to prod-bastion is already in progress',
       'getaddrinfo ENOTFOUND buildbox',
+      'getaddrinfo ENOTFOUND "buildbox"',
+      "ssh: Could not resolve hostname 'mybox': Name or service not known",
       'Connection closed by nas port 22',
       "Warning: Permanently added 'prod-db-01' (ED25519) to the list of known hosts.",
       'Host key for prod-db-01 has changed and you have requested strict checking.',
+      'Authenticated to bastion ([10.0.0.1]:22) using "publickey".',
+      'Failed password for alice from 10.0.0.1 port 22 ssh2',
       'no such file or directory: /Users/John Smith',
       'Load key E:\\Home Dirs\\jsmith\\.ssh\\id_rsa: bad perms',
       'cannot open .\\keys\\Jane Smith\\id_rsa',

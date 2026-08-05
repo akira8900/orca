@@ -448,6 +448,36 @@ describe('ssh status timeline recording', () => {
       })
     ])
   })
+
+  // A push for an unhydrated target forces a hydration that re-reads the very
+  // state the push recorded — one arrival that must not read back as a flap.
+  it('does not count the hydration a push forces as a repeat of that push', async () => {
+    const envId = timelineEnvId()
+    const pushed = connState(TIMELINE_TARGET, 'reconnecting')
+    installRpcResponses({
+      targets: [{ id: TIMELINE_TARGET, label: 'devbox' }],
+      states: { [TIMELINE_TARGET]: pushed }
+    })
+
+    applyRuntimeEnvironmentSshStateChanged(envId, TIMELINE_TARGET, pushed)
+    await vi.waitFor(() => {
+      expect(
+        useAppStore
+          .getState()
+          .sshStateByEnvironment.get(envId)
+          ?.connectionStates.has(TIMELINE_TARGET)
+      ).toBe(true)
+    })
+
+    expect(snapshotSshStatusTimeline(TIMELINE_TARGET, envId)).toEqual([
+      expect.objectContaining({
+        status: 'reconnecting',
+        origin: 'runtime-push',
+        repeats: 1,
+        runMs: null
+      })
+    ])
+  })
 })
 
 describe('connectRuntimeEnvironmentSshTarget', () => {

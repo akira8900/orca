@@ -106,6 +106,14 @@ describe('redactor — labeled key-value', () => {
   it('redacts Authorization=Bearer …', () => {
     expect(redactString('Authorization=Bearer abcdef')).toBe('[redacted:labeled-kv]')
   })
+  // The scheme word is `\S+`-shaped, so a rule that stops at it publishes the
+  // base64 `user:password` that follows.
+  it('redacts the credential after Authorization: Basic', () => {
+    const credential = 'QWxhZGRpbjpvcGVuIHNlc2FtZQ=='
+    const out = redactString(`Authorization: Basic ${credential}`)
+    expect(out).toBe('[redacted:labeled-kv]')
+    expect(out).not.toContain(credential)
+  })
   it('redacts password=…', () => {
     expect(redactString("password='hunter2'")).toContain('[redacted:labeled-kv]')
   })

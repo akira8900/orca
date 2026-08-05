@@ -14,6 +14,7 @@ import { snapshotSshStatusTimeline, type SshStatusTimelineEntry } from './ssh-st
 
 export {
   MAX_FREE_TEXT_CHARS,
+  MAX_SCRUB_INPUT_CHARS,
   redactPaths,
   redactSshIdentifiers,
   scrubDiagnosticText

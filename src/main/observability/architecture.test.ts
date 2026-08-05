@@ -3,48 +3,14 @@
 //   "Nothing in `src/main/telemetry/` imports from `src/main/observability/`
 //    or vice versa. The two lanes never share a code path."
 //
-// Cross-contamination is the failure mode the entire two-lane split is
-// counter-designed against. oxlint's plugin set does not include
-// `import-x`, and adding eslint just for this rule is a heavier lift than
-// the rule warrants. A vitest test that grep-scans the two directories is
-// adequate, runs in <50 ms, and fails CI loudly if a future PR adds the
-// wrong import.
-//
-// What it catches:
-//   - any `from '../observability'` / `from '../observability/...'` inside
-//     `src/main/telemetry/`
-//   - any `from '../telemetry'` / `from '../telemetry/...'` inside
-//     `src/main/observability/`
-//   - the same with deeper relative paths (`../../observability/...`)
-//   - the same with absolute-from-src forms if anyone introduces them
-//   - a `src/shared/observability-*.ts` file importing *either* lane. The
-//     redactor lives in `src/shared/` so the renderer can import it, which puts
-//     it outside both lane directories; without this root it is a free
-//     smuggling route between the lanes.
-//   - `src/shared/observability-redactor.ts` growing any import at all. Zero
-//     imports is what keeps it renderer-safe, and it is also what makes the
-//     lane-neutrality above hold transitively.
-//   - any `src/shared/observability-*.ts` module reaching for a Node-only API.
-//     The checks are keyed on the prefix rather than on the one filename, so a
-//     second shared observability module inherits them instead of arriving
-//     uncovered.
-//
-// Specifiers are resolved to repo-relative paths and matched on the `main/<lane>`
-// path segments rather than by substring, so `src/main/telemetry/` importing the
-// lane-neutral `'../../shared/observability-redactor'` is allowed — that spec
-// contains the word but resolves outside the observability lane.
-//
-// What it does NOT catch:
-//   - `import()` / `require()` with a computed (non-literal) specifier —
-//     only a literal string is visible to a regex scan. Neither lane builds
-//     specifiers at runtime.
-//   - re-exports through a third module. The simplest workaround
-//     (re-export `observability` from a "neutral" module) is the same
-//     anti-pattern this test is preventing; reviewers should reject it.
-//
-// Both directions of the rule are checked symmetrically — the asymmetric
-// alternative (only one-way) leaves the door open to a `setOptIn` →
-// `bundle` callback chain that smuggles consent state across the boundary.
+// A grep scan stands in for an import lint: oxlint ships no `import-x`, and
+// adding eslint for one rule is the heavier lift. Specifiers are resolved and
+// matched on `main/<lane>` path segments, not by substring, so telemetry may
+// import the lane-neutral `shared/observability-redactor` — which is scanned in
+// turn (it sits outside both lane directories, and must stay import-free to stay
+// renderer-safe). Checks key on the `observability-*` prefix so a second shared
+// module inherits them. Blind spots: computed specifiers, and re-exports through
+// a third module — the latter is the same anti-pattern, so reviewers reject it.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'

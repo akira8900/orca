@@ -152,14 +152,20 @@ describe('useIpcEvents SSH status timeline recording', () => {
       providerEpoch: 'epoch-1',
       connectionGeneration: 3
     }
-    const harness = await loadIpcEventsHarness(createSshStoreState(), {
-      ssh: { getState: () => Promise.resolve(connected) }
-    })
+    const getState = vi.fn(() => Promise.resolve(connected))
+    const harness = await loadIpcEventsHarness(createSshStoreState(), { ssh: { getState } })
     harness.useIpcEvents()
 
     harness.sshStateChanged({ targetId: 'conn-1', state: connected })
 
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Wait on the push landing rather than on a bare timer tick: a reconcile
+    // chain that grows another await would otherwise make this pass vacuously.
+    await vi.waitFor(async () => {
+      expect(await readTimeline('conn-1')).toHaveLength(1)
+    })
+    // The complete authority is what skips reconciliation, so the read it would
+    // have made is the signal that none was attempted.
+    expect(getState).not.toHaveBeenCalled()
     expect(await readTimeline('conn-1')).toEqual([
       expect.objectContaining({ status: 'connected', origin: 'push', generation: 3, repeats: 1 })
     ])

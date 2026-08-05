@@ -6,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { useMountedRef } from '@/hooks/useMountedRef'
 import { useAppStore } from '@/store'
 import type { SshConnectionStatus } from '../../../../shared/ssh-types'
+import type { DiagnosticsStatusPayload } from '../../../../preload/api-types'
 import { assertClipboardTextWriteWithinLimit } from '../../../../shared/clipboard-text'
 import { translate } from '@/i18n/i18n'
 import { buildSshDiagnosticReport, formatSshDiagnosticReport } from '@/lib/ssh-diagnostic-report'
@@ -42,6 +43,26 @@ type TerminalSshReconnectOverlayProps = {
 // setting the user never touched.
 function isWebClient(): boolean {
   return (globalThis as { __ORCA_WEB_CLIENT__?: boolean }).__ORCA_WEB_CLIENT__ === true
+}
+
+// Why: report assembly is synchronous precisely because a wedged main process is
+// the state it exists for, and this consent read is the one round-trip in front
+// of it — unbounded, it leaves the button inert with no toast at all.
+const DIAGNOSTICS_CONSENT_TIMEOUT_MS = 3_000
+
+// Rejects rather than resolving "off": the disabled branch would blame a setting
+// the user never touched, so a stalled read belongs in the copy-failed toast.
+function readDiagnosticsConsent(): Promise<DiagnosticsStatusPayload> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error('Timed out reading diagnostics consent')),
+      DIAGNOSTICS_CONSENT_TIMEOUT_MS
+    )
+  })
+  return Promise.race([window.api.diagnostics.getStatus(), timeout]).finally(() => {
+    clearTimeout(timer)
+  })
 }
 
 function messageForStatus(status: SshConnectionStatus, targetLabel: string): string {
@@ -154,7 +175,7 @@ export function TerminalSshReconnectOverlay({
     try {
       // Why: consent gates the copy, not the button — resolving it before the
       // click would pop the button in after first paint and resize the row (§7).
-      const diagnosticsStatus = await window.api.diagnostics.getStatus()
+      const diagnosticsStatus = await readDiagnosticsConsent()
       // Why the flag and not one reason string: `ci` is resolved first and masks
       // an explicit ORCA_DIAGNOSTICS_DISABLED, and the web stub omits the reason
       // entirely. `localFileEnabled` is what every other diagnostics-egress

@@ -125,9 +125,24 @@ export type IpcEventsHarness = {
   sshStateChanged: (data: { targetId: string; state: unknown }) => void
 }
 
+/** Named so a misspelled override (`getStates`) fails to compile instead of
+ *  silently leaving the default stub in place under an assertion. */
+type SshApiStub = {
+  listTargets: () => Promise<unknown>
+  listPortForwards: () => Promise<unknown>
+  listDetectedPorts: () => Promise<unknown>
+  listRemovedTargetLabels: () => Promise<unknown>
+  getState: (args?: { targetId: string }) => Promise<unknown>
+  onStateChanged: (listener: (data: { targetId: string; state: unknown }) => void) => () => void
+  onCredentialRequest: () => () => void
+  onCredentialResolved: () => () => void
+  onPortForwardsChanged: () => () => void
+  onDetectedPortsChanged: () => () => void
+}
+
 export type IpcEventsHarnessOptions = {
   /** Merged over the default `window.api.ssh` stub. */
-  ssh?: Record<string, unknown>
+  ssh?: Partial<SshApiStub>
   /** Runs after the module registry reset, so callers can add their own `vi.doMock`. */
   mockModules?: () => void
 }
@@ -179,6 +194,23 @@ export async function loadIpcEventsHarness(
   }))
   vi.doMock('@/lib/activate-tab-and-focus-pane', () => ({ activateTabAndFocusPane: vi.fn() }))
 
+  const ssh: SshApiStub = {
+    listTargets: () => Promise.resolve([]),
+    listPortForwards: () => Promise.resolve([]),
+    listDetectedPorts: () => Promise.resolve([]),
+    listRemovedTargetLabels: () => Promise.resolve([]),
+    getState: () => Promise.resolve(null),
+    onStateChanged: (listener) => {
+      sshStateListener = listener
+      return () => {}
+    },
+    onCredentialRequest: () => () => {},
+    onCredentialResolved: () => () => {},
+    onPortForwardsChanged: () => () => {},
+    onDetectedPortsChanged: () => () => {},
+    ...options.ssh
+  }
+
   vi.stubGlobal('window', {
     dispatchEvent: vi.fn(),
     api: new Proxy(
@@ -212,22 +244,7 @@ export async function loadIpcEventsHarness(
           onTerminalDriverChanged: () => () => {},
           onBrowserDriverChanged: () => () => {}
         },
-        ssh: {
-          listTargets: () => Promise.resolve([]),
-          listPortForwards: () => Promise.resolve([]),
-          listDetectedPorts: () => Promise.resolve([]),
-          listRemovedTargetLabels: () => Promise.resolve([]),
-          getState: () => Promise.resolve(null),
-          onStateChanged: (listener: (data: { targetId: string; state: unknown }) => void) => {
-            sshStateListener = listener
-            return () => {}
-          },
-          onCredentialRequest: () => () => {},
-          onCredentialResolved: () => () => {},
-          onPortForwardsChanged: () => () => {},
-          onDetectedPortsChanged: () => () => {},
-          ...options.ssh
-        },
+        ssh,
         updater: {
           getStatus: () => Promise.resolve({ state: 'idle' }),
           onStatus: () => () => {},

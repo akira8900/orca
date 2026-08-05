@@ -3,7 +3,7 @@
 import '@testing-library/jest-dom/vitest'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ReactElement } from 'react'
 import { TerminalSshReconnectOverlay } from './TerminalSshReconnectOverlay'
@@ -130,6 +130,7 @@ describe('TerminalSshReconnectOverlay', () => {
 
   afterEach(() => {
     cleanup()
+    vi.useRealTimers()
   })
 
   it('renders a non-blocking Connect banner for a disconnected SSH terminal', async () => {
@@ -436,6 +437,32 @@ describe('TerminalSshReconnectOverlay', () => {
     await waitFor(() => expect(toastMocks.error).toHaveBeenCalledWith('Failed to copy diagnostics'))
     expect(diagnostics.writeClipboardText).toHaveBeenCalledTimes(1)
     expect(toastMocks.success).not.toHaveBeenCalled()
+  })
+
+  // A main process that stops answering is the state this report exists for, so
+  // the consent read in front of the (synchronous) assembly has to be bounded —
+  // an unsettled promise never reaches the catch, leaving the button inert.
+  it('reports a copy failure when the consent read never settles', async () => {
+    const diagnostics = installSshConnect(
+      vi.fn(),
+      {},
+      { getDiagnosticsStatus: vi.fn().mockReturnValue(new Promise(() => {})) }
+    )
+    vi.useFakeTimers()
+
+    renderOverlay(
+      <TerminalSshReconnectOverlay targetId="ssh-target-1" targetLabel="devbox" status="error" />
+    )
+
+    // fireEvent, not userEvent: its pointer sequence waits on the timers this
+    // case has to drive by hand.
+    fireEvent.click(screen.getByRole('button', { name: 'Copy diagnostics' }))
+    expect(toastMocks.error).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    expect(diagnostics.getDiagnosticsStatus).toHaveBeenCalledTimes(1)
+    expect(toastMocks.error).toHaveBeenCalledWith('Failed to copy diagnostics')
+    expect(diagnostics.writeClipboardText).not.toHaveBeenCalled()
   })
 
   // Why each posture, not just the explicit opt-out: `ci` is resolved before

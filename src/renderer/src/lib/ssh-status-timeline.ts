@@ -42,9 +42,14 @@ const lastRecorded = new Map<string, { key: string; atMs: number }>()
 // owning host, and a runtime hydration sweep re-inserts every target it reads —
 // so an unscoped LRU lets that sweep evict the ring being captured.
 // `:` is escaped so an environment id cannot forge the `::` scope boundary
-// `scopeOfKey` splits on.
+// `scopeOfKey` splits on, and `%` before it so the escape itself is reversible —
+// otherwise `a:b` and `a%3Ab` share a scope. The local namespace is a separate
+// literal so an environment id of `local` cannot merge into it.
 function scopeOf(environmentId?: string | null): string {
-  return `${(environmentId ?? 'local').replaceAll(':', '%3A')}::`
+  if (environmentId == null) {
+    return 'local::'
+  }
+  return `environment=${environmentId.replaceAll('%', '%25').replaceAll(':', '%3A')}::`
 }
 
 function scopeOfKey(key: string): string {
@@ -170,10 +175,16 @@ export function recordSshStateArrival(
       origin
     }
     if (last?.key === key) {
+      // A hydration that re-reads the state the timeline already ends with is a
+      // poll, not an arrival — the forced hydration a push triggers re-reads that
+      // same push, and folding it in reports one arrival as a flap.
+      if (origin === 'initial-hydration' || origin === 'runtime-hydration') {
+        return
+      }
       // Fold a repeat of the same (status, attempt, generation) at any spacing,
       // preserving the run's START time — the ring stamps its own coalescing
-      // with the LAST.
-      ringFor(timelineId).record(key, { ...detail, runMs: now - last.atMs })
+      // with the LAST. Clamped: a backwards system clock would store a negative run.
+      ringFor(timelineId).record(key, { ...detail, runMs: Math.max(0, now - last.atMs) })
       return
     }
     lastRecorded.set(timelineId, { key, atMs: now })
