@@ -12,7 +12,7 @@ import {
   redactValue,
   redactSpan,
   type RedactableSpan
-} from './redactor'
+} from './observability-redactor'
 
 const SECRETS = {
   anthropic: 'sk-ant-api03-aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789ABCDEFGHIJKLMNOP',

@@ -1,10 +1,14 @@
 import { useCallback } from 'react'
-import { Loader2, Server, ServerOff } from 'lucide-react'
+import { Copy, Loader2, Server, ServerOff } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { useMountedRef } from '@/hooks/useMountedRef'
 import { useAppStore } from '@/store'
 import type { SshConnectionStatus } from '../../../../shared/ssh-types'
+import { assertClipboardTextWriteWithinLimit } from '../../../../shared/clipboard-text'
 import { translate } from '@/i18n/i18n'
+import { buildSshDiagnosticReport, formatSshDiagnosticReport } from '@/lib/ssh-diagnostic-report'
 import { runWorktreeDelete } from '../sidebar/delete-worktree-flow'
 import {
   connectRuntimeEnvironmentSshTarget,
@@ -31,6 +35,13 @@ type TerminalSshReconnectOverlayProps = {
   // environment): Connect and the failed-connect resync then route to that
   // environment's runtime RPC and bucket instead of the local ssh.* API.
   sshOwnerEnvironmentId?: string | null
+}
+
+// Why: the web stub cannot reach the serving host's consent, so it reports
+// diagnostics off for every browser client — name that instead of blaming a
+// setting the user never touched.
+function isWebClient(): boolean {
+  return (globalThis as { __ORCA_WEB_CLIENT__?: boolean }).__ORCA_WEB_CLIENT__ === true
 }
 
 function messageForStatus(status: SshConnectionStatus, targetLabel: string): string {
@@ -78,6 +89,7 @@ export function TerminalSshReconnectOverlay({
   worktreeId,
   sshOwnerEnvironmentId = null
 }: TerminalSshReconnectOverlayProps): React.JSX.Element {
+  const mountedRef = useMountedRef()
   const setSshConnectionState = useAppStore((store) => store.setSshConnectionState)
   // Why: shared registry, not local state — the sidebar card control can dial the same
   // target, and the store status lags a click by one IPC hop.
@@ -138,6 +150,67 @@ export function TerminalSshReconnectOverlay({
     }
   }, [setSshConnectionState, sshOwnerEnvironmentId, status, targetId])
 
+  const handleCopyDiagnostics = useCallback(async () => {
+    try {
+      // Why: consent gates the copy, not the button — resolving it before the
+      // click would pop the button in after first paint and resize the row (§7).
+      const diagnosticsStatus = await window.api.diagnostics.getStatus()
+      // Why the flag and not one reason string: `ci` is resolved first and masks
+      // an explicit ORCA_DIAGNOSTICS_DISABLED, and the web stub omits the reason
+      // entirely. `localFileEnabled` is what every other diagnostics-egress
+      // surface gates on, and it stays true under DO_NOT_TRACK — a network
+      // signal that does not govern a clipboard copy.
+      if (!diagnosticsStatus?.localFileEnabled) {
+        if (mountedRef.current) {
+          toast.error(
+            isWebClient()
+              ? translate(
+                  'auto.components.terminal.pane.TerminalSshReconnectOverlay.diagnosticsUnavailableOnWeb',
+                  'Copying diagnostics is unavailable on web.'
+                )
+              : translate(
+                  'auto.components.terminal.pane.TerminalSshReconnectOverlay.diagnosticsDisabled',
+                  'Diagnostics are disabled on this device.'
+                )
+          )
+        }
+        return
+      }
+      // Why not navigator.clipboard: it fails silently inside Radix surfaces.
+      // Why assert rather than shed entries: the 512-char capture cap bounds the
+      // report at ~2% of the clipboard limit, so a throw here means a new
+      // unbounded field — surfacing it beats pasting a silently trimmed report.
+      await window.api.ui.writeClipboardText(
+        assertClipboardTextWriteWithinLimit(
+          formatSshDiagnosticReport(
+            buildSshDiagnosticReport({
+              targetId,
+              targetRemoved,
+              environmentId: sshOwnerEnvironmentId ?? null
+            })
+          )
+        )
+      )
+      if (mountedRef.current) {
+        toast.success(
+          translate(
+            'auto.components.terminal.pane.TerminalSshReconnectOverlay.diagnosticsCopied',
+            'Diagnostics copied'
+          )
+        )
+      }
+    } catch {
+      if (mountedRef.current) {
+        toast.error(
+          translate(
+            'auto.components.terminal.pane.TerminalSshReconnectOverlay.diagnosticsCopyFailed',
+            'Failed to copy diagnostics'
+          )
+        )
+      }
+    }
+  }, [mountedRef, sshOwnerEnvironmentId, targetId, targetRemoved])
+
   // Why: z-40 clears pane-local chrome (focus rim z-30); bg-card is fully opaque so terminal text cannot paint through.
   return (
     <div
@@ -157,7 +230,8 @@ export function TerminalSshReconnectOverlay({
           )}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
+          {/* Why overflow-hidden: the title is shrink-0 so the host label truncates first, but below ~415px even the title overflows — clip it here or its bold glyphs paint over the copy button. */}
+          <div className="flex min-w-0 items-center gap-2 overflow-hidden">
             <div className="shrink-0 text-sm font-semibold">
               {targetRemoved
                 ? translate(
@@ -183,6 +257,29 @@ export function TerminalSshReconnectOverlay({
               : messageForStatus(status, targetLabel)}
           </div>
         </div>
+        {/* Recessive and mounted in every state: this overlay paints on every wake-from-sleep, so an eye-catching button would read as an alarm (§6.1). */}
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              className="shrink-0 text-muted-foreground hover:text-foreground"
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => void handleCopyDiagnostics()}
+              aria-label={translate(
+                'auto.components.terminal.pane.TerminalSshReconnectOverlay.copyDiagnosticsLabel',
+                'Copy diagnostics'
+              )}
+            >
+              <Copy className="size-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="top" sideOffset={4}>
+            {translate(
+              'auto.components.terminal.pane.TerminalSshReconnectOverlay.copyDiagnosticsLabel',
+              'Copy diagnostics'
+            )}
+          </TooltipContent>
+        </Tooltip>
         {targetRemoved ? (
           <Button
             className="shrink-0"

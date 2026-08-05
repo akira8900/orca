@@ -2927,7 +2927,12 @@
             "connectButton": "Connect",
             "removedTitle": "SSH host removed",
             "removedBody": "The SSH host for this workspace was removed, so it can no longer connect. Remove the workspace to clear it — remote files are left untouched.",
-            "removeWorkspaceButton": "Remove workspace"
+            "removeWorkspaceButton": "Remove workspace",
+            "diagnosticsDisabled": "Diagnostics are disabled on this device.",
+            "diagnosticsCopied": "Diagnostics copied",
+            "diagnosticsCopyFailed": "Failed to copy diagnostics",
+            "copyDiagnosticsLabel": "Copy diagnostics",
+            "diagnosticsUnavailableOnWeb": "Copying diagnostics is unavailable on web."
           },
           "TerminalRemoteRuntimeReconnectBanner": {
             "retryingTitle": "Reconnecting to remote runtime",

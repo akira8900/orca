@@ -122,6 +122,14 @@ export type IpcEventsHarness = {
   createTerminal: (request: CreateTerminalRequest) => void
   requestTerminalCreate: (request: RequestTerminalCreateRequest) => void
   replyTerminalCreate: ReturnType<typeof vi.fn>
+  sshStateChanged: (data: { targetId: string; state: unknown }) => void
+}
+
+export type IpcEventsHarnessOptions = {
+  /** Merged over the default `window.api.ssh` stub. */
+  ssh?: Record<string, unknown>
+  /** Runs after the module registry reset, so callers can add their own `vi.doMock`. */
+  mockModules?: () => void
 }
 
 /**
@@ -129,11 +137,13 @@ export type IpcEventsHarness = {
  * create-terminal IPC, so reveal/adoption behavior is asserted through the hook.
  */
 export async function loadIpcEventsHarness(
-  storeState: HarnessStoreState
+  storeState: HarnessStoreState,
+  options: IpcEventsHarnessOptions = {}
 ): Promise<IpcEventsHarness> {
   const replyTerminalCreate = vi.fn()
   let createTerminalListener: ((request: CreateTerminalRequest) => void) | null = null
   let requestTerminalCreateListener: ((request: RequestTerminalCreateRequest) => void) | null = null
+  let sshStateListener: ((data: { targetId: string; state: unknown }) => void) | null = null
 
   vi.resetModules()
   vi.unstubAllGlobals()
@@ -208,11 +218,15 @@ export async function loadIpcEventsHarness(
           listDetectedPorts: () => Promise.resolve([]),
           listRemovedTargetLabels: () => Promise.resolve([]),
           getState: () => Promise.resolve(null),
-          onStateChanged: () => () => {},
+          onStateChanged: (listener: (data: { targetId: string; state: unknown }) => void) => {
+            sshStateListener = listener
+            return () => {}
+          },
           onCredentialRequest: () => () => {},
           onCredentialResolved: () => () => {},
           onPortForwardsChanged: () => () => {},
-          onDetectedPortsChanged: () => () => {}
+          onDetectedPortsChanged: () => () => {},
+          ...options.ssh
         },
         updater: {
           getStatus: () => Promise.resolve({ state: 'idle' }),
@@ -228,6 +242,8 @@ export async function loadIpcEventsHarness(
     )
   })
 
+  options.mockModules?.()
+
   const { useIpcEvents } = await import('./useIpcEvents')
   return {
     useIpcEvents,
@@ -242,6 +258,12 @@ export async function loadIpcEventsHarness(
         throw new Error('Expected the request-terminal-create listener to be registered')
       }
       requestTerminalCreateListener(request)
+    },
+    sshStateChanged: (data) => {
+      if (typeof sshStateListener !== 'function') {
+        throw new Error('Expected the ssh state-changed listener to be registered')
+      }
+      sshStateListener(data)
     },
     replyTerminalCreate
   }
